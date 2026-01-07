@@ -12,7 +12,7 @@ const P_SP: &str = " ";
 
 #[derive(Clone)]
 pub struct Grid {
-    data: Vec<Vec<Option<Color>>>,
+    pub data: Vec<Vec<Option<Color>>>,
 }
 
 impl Grid {
@@ -117,7 +117,9 @@ impl Grid {
                 };
             }
 
-            res += "\n"
+            if row != nb_rows - 1 {
+                res += "\n";
+            }
         }
 
         return res;

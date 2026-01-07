@@ -1,4 +1,8 @@
-use std::{env, usize};
+use ansi_control_codes::c0::ESC;
+use std::{
+    env,
+    io::{self, Write},
+};
 
 use grid::*;
 use point::*;
@@ -48,7 +52,7 @@ fn get_smart_neighbors(path: &Path, grid: &Grid) -> Vec<Coord> {
         .collect();
 }
 
-fn generate_paths_rec(goal: &Coord, path: &Path, grid: &Grid) -> Vec<Path> {
+fn generate_paths(goal: &Coord, path: &Path, grid: &Grid) -> Vec<Path> {
     if has_arrived(path.last().unwrap(), goal) {
         let mut res = path.clone();
         res.push(goal.clone());
@@ -60,17 +64,13 @@ fn generate_paths_rec(goal: &Coord, path: &Path, grid: &Grid) -> Vec<Path> {
     for neighbor in get_smart_neighbors(path, grid) {
         let mut next = path.clone();
         next.push(neighbor);
-        res.append(&mut generate_paths_rec(goal, &next, grid));
+        res.append(&mut generate_paths(goal, &next, grid));
     }
 
     return res;
 }
 
-fn find_paths(begin: &Coord, end: &Coord, grid: &Grid) -> Vec<Path> {
-    return generate_paths_rec(end, &vec![begin.clone()], grid);
-}
-
-fn find_all_paths(grid: &Grid) -> Vec<Vec<Path>> {
+fn generate_all_paths(grid: &Grid) -> Vec<Vec<Path>> {
     let (nb_rows, nb_cols) = grid.get_dims();
     let points = grid.find_points();
     let nb_colors = points.len() / 2;
@@ -80,13 +80,17 @@ fn find_all_paths(grid: &Grid) -> Vec<Vec<Path>> {
     for i in 0..nb_colors {
         let begin = find_other_point(&points, &Point::new((nb_rows, nb_cols), i));
         let end = find_other_point(&points, &begin);
-        res.push(find_paths(&begin.coord, &end.coord, &grid));
+        res.push(generate_paths(&end.coord, &vec![begin.coord], grid));
     }
 
     return res;
 }
 
-fn find_forced_coord(paths: &Vec<Path>, dims: &(usize, usize)) -> Vec<Coord> {
+fn get_paths_refs(paths: &Vec<Vec<Path>>) -> Vec<Vec<&Path>> {
+    return paths.iter().map(|p| p.iter().collect()).collect();
+}
+
+fn get_forced_coord(paths: &[&Path], dims: &(usize, usize)) -> Vec<Coord> {
     if paths.is_empty() {
         return vec![];
     }
@@ -94,32 +98,29 @@ fn find_forced_coord(paths: &Vec<Path>, dims: &(usize, usize)) -> Vec<Coord> {
     let &(nb_rows, nb_cols) = dims;
     let nb_paths = paths.len();
 
-    let mut map = vec![vec![0; nb_cols]; nb_rows];
-
-    for path in paths {
+    let mut map = vec![0; nb_cols * nb_rows];
+    for &path in paths {
         for &(row, col) in path {
-            map[row][col] += 1;
+            map[col + nb_cols * row] += 1;
         }
     }
 
+    let map = map;
     let mut res = vec![];
-
-    for row in 0..nb_rows {
-        for col in 0..nb_cols {
-            if map[row][col] == nb_paths {
-                res.push((row, col));
-            }
+    for (i, elem) in map.iter().enumerate() {
+        if elem == &nb_paths {
+            res.push((i / nb_cols, i % nb_cols));
         }
     }
 
     return res;
 }
 
-fn generate_forced_grid(paths: &Vec<Vec<Path>>, dims: &(usize, usize)) -> Grid {
+fn generate_forced_grid(paths: &Vec<Vec<&Path>>, dims: &(usize, usize)) -> Grid {
     let mut grid = Grid::new(dims);
 
     for (color, p) in paths.iter().enumerate() {
-        for coord in &find_forced_coord(p, dims) {
+        for coord in &get_forced_coord(p, dims) {
             grid.set(coord, Some(color));
         }
     }
@@ -127,12 +128,12 @@ fn generate_forced_grid(paths: &Vec<Vec<Path>>, dims: &(usize, usize)) -> Grid {
     return grid;
 }
 
-fn generate_single_grid(paths: &Vec<Vec<Path>>, dims: &(usize, usize)) -> Grid {
+fn generate_single_grid(paths: &Vec<Vec<&Path>>, dims: &(usize, usize)) -> Grid {
     let nb_colors = paths.len();
     let mut grid = Grid::new(dims);
 
     for color in 0..nb_colors {
-        for path in &paths[color] {
+        for &path in &paths[color] {
             for coord in path {
                 grid.set(
                     coord,
@@ -151,11 +152,10 @@ fn generate_single_grid(paths: &Vec<Vec<Path>>, dims: &(usize, usize)) -> Grid {
         }
     }
 
-    for row in 0..dims.0 {
-        for col in 0..dims.1 {
-            let coord = &(row, col);
-            if grid.get(coord) == Some(usize::MAX) {
-                grid.set(coord, None);
+    for line in &mut grid.data {
+        for elem in line {
+            if elem == &Some(usize::MAX) {
+                *elem = None;
             }
         }
     }
@@ -164,15 +164,12 @@ fn generate_single_grid(paths: &Vec<Vec<Path>>, dims: &(usize, usize)) -> Grid {
 }
 
 fn get_single_coords(grid: &Grid, color: &Color) -> Vec<Coord> {
-    let (nb_rows, nb_cols) = grid.get_dims();
-
     let mut res = vec![];
 
-    for row in 0..nb_rows {
-        for col in 0..nb_cols {
-            let coord = (row, col);
-            if grid.get(&coord) == Some(*color) {
-                res.push(coord);
+    for (row, line) in grid.data.iter().enumerate() {
+        for (col, elem) in line.iter().enumerate() {
+            if elem == &Some(*color) {
+                res.push((row, col));
             }
         }
     }
@@ -180,11 +177,9 @@ fn get_single_coords(grid: &Grid, color: &Color) -> Vec<Coord> {
     return res;
 }
 
-fn filter_paths_forced(paths: &mut Vec<Vec<Path>>, dims: &(usize, usize)) {
+fn filter_paths_forced(paths: &mut Vec<Vec<&Path>>, dims: &(usize, usize)) {
     let nb_colors = paths.len();
     let grid = generate_forced_grid(paths, dims);
-
-    // println!("{}", grid.to_string());
 
     for color in 0..nb_colors {
         paths[color] = paths[color]
@@ -194,72 +189,120 @@ fn filter_paths_forced(paths: &mut Vec<Vec<Path>>, dims: &(usize, usize)) {
                     .iter()
                     .any(|coord| grid.get(coord).is_some_and(|c| c != color))
             })
-            .map(|p| p.clone())
+            .map(|&p| p)
             .collect()
     }
 
     return;
 }
 
-fn filter_paths_single(paths: &mut Vec<Vec<Path>>, dims: &(usize, usize)) {
+fn filter_paths_single(paths: &mut Vec<Vec<&Path>>, dims: &(usize, usize)) {
     let nb_colors = paths.len();
     let grid = generate_single_grid(paths, dims);
     let &(nb_rows, nb_cols) = dims;
 
     for color in 0..nb_colors {
-        let single = get_single_coords(&grid, &color);
-        let mut n_p = vec![];
-        for path in &paths[color] {
-            let mut map = vec![vec![false; nb_cols]; nb_rows];
+        paths[color] = paths[color]
+            .iter()
+            .filter(|&&path| {
+                let mut map = vec![false; nb_cols * nb_rows];
 
-            for coord in path {
-                map[coord.0][coord.1] = true;
-            }
+                for (row, col) in path {
+                    map[col + row * nb_cols] = true;
+                }
 
-            if single.iter().all(|coord| map[coord.0][coord.1]) {
-                n_p.push(path.clone());
-            }
-        }
-
-        paths[color] = n_p;
+                get_single_coords(&grid, &color)
+                    .iter()
+                    .all(|(row, col)| map[col + row * nb_cols])
+            })
+            .map(|&path| path)
+            .collect();
     }
 
     return;
 }
 
-fn prune(paths: &mut Vec<Vec<Path>>, dims: &(usize, usize)) {
+fn check_reachable(paths: &Vec<Vec<&Path>>, dims: &(usize, usize)) -> bool {
+    let &(nb_rows, nb_cols) = dims;
+    let mut map = vec![false; nb_cols * nb_rows];
+    let mut count = nb_rows * nb_cols;
+
+    for p in paths {
+        for &path in p {
+            for &(row, col) in path {
+                if !map[col + row * nb_cols] {
+                    count -= 1;
+                    if count == 0 {
+                        return true;
+                    }
+                }
+                map[col + row * nb_cols] = true;
+            }
+        }
+    }
+
+    return false;
+}
+
+fn prune(paths: &mut Vec<Vec<&Path>>, dims: &(usize, usize), verbose: bool) -> Option<bool> {
+    let nb_colors = paths.len();
     let mut nb_paths: usize = paths.iter().map(|p| p.len()).sum();
     let mut last_nb_paths = 0;
+    let mut grid_str = None;
 
-    while nb_paths != last_nb_paths {
-        filter_paths_single(paths, dims);
+    while !(nb_paths == last_nb_paths) {
+        if verbose {
+            grid_str = Some(generate_forced_grid(paths, dims).to_string());
+        }
+
         filter_paths_forced(paths, dims);
+        filter_paths_single(paths, dims);
 
         last_nb_paths = nb_paths;
         nb_paths = paths.iter().map(|p| p.len()).sum();
+
+        if verbose {
+            println!("{}", grid_str.as_ref().unwrap());
+            print!("{ESC}[2K");
+            print!(
+                "Number of possible paths: {} (",
+                paths.iter().map(|p| p.len()).sum::<usize>()
+            );
+            for color in 0..nb_colors {
+                print!("{}", paths[color].len());
+                if color != nb_colors - 1 {
+                    print!(" - ")
+                }
+            }
+            print!("){ESC}[{}F", dims.0);
+            io::stdout().flush().unwrap();
+        }
+
+        if is_solved(paths) {
+            return Some(true);
+        }
+        if is_impossible(paths) || !check_reachable(paths, dims) {
+            return Some(false);
+        }
     }
 
-    return;
+    return None;
 }
 
-fn is_solved(paths: &Vec<Vec<Path>>) -> bool {
+fn is_solved(paths: &Vec<Vec<&Path>>) -> bool {
     return paths.iter().all(|p| p.len() == 1);
 }
 
-fn is_impossible(paths: &Vec<Vec<Path>>) -> bool {
+fn is_impossible(paths: &Vec<Vec<&Path>>) -> bool {
     return paths.iter().any(|p| p.is_empty());
 }
 
-fn backtrack(paths: &mut Vec<Vec<Path>>, dims: &(usize, usize)) -> bool {
+fn backtrack(paths: &mut Vec<Vec<&Path>>, dims: &(usize, usize), verbose: bool) -> bool {
     let nb_colors = paths.len();
+    let res = prune(paths, dims, verbose);
 
-    prune(paths, dims);
-
-    if is_solved(paths) {
-        return true;
-    }
-    if is_impossible(paths) {
-        return false;
+    if let Some(r) = res {
+        return r;
     }
 
     let mut index = 0;
@@ -267,17 +310,17 @@ fn backtrack(paths: &mut Vec<Vec<Path>>, dims: &(usize, usize)) -> bool {
         index += 1;
     }
 
-    for path in &paths[index] {
+    for &path in &paths[index] {
         let mut n_paths = vec![];
         for color in 0..nb_colors {
             n_paths.push(if color == index {
-                vec![path.clone()]
+                vec![path]
             } else {
                 paths[color].clone()
             });
         }
 
-        if backtrack(&mut n_paths, dims) {
+        if backtrack(&mut n_paths, dims, verbose) {
             *paths = n_paths;
             return true;
         }
@@ -286,11 +329,11 @@ fn backtrack(paths: &mut Vec<Vec<Path>>, dims: &(usize, usize)) -> bool {
     return false;
 }
 
-fn generate_final_grid(paths: &Vec<Vec<Path>>, dims: &(usize, usize)) -> Grid {
+fn generate_final_grid(paths: &Vec<Vec<&Path>>, dims: &(usize, usize)) -> Grid {
     let mut grid = Grid::new(dims);
 
     for (color, path) in paths.iter().enumerate() {
-        for coord in &path[0] {
+        for coord in path[0] {
             grid.set(&coord, Some(color));
         }
     }
@@ -301,7 +344,8 @@ fn generate_final_grid(paths: &Vec<Vec<Path>>, dims: &(usize, usize)) -> Grid {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() == 1 || args[1] == "-h" || args[1] == "help" {
+    if args.len() == 1 || args.contains(&"-h".to_string()) || args[1].contains(&"help".to_string())
+    {
         println!("Flowfree Solver");
         println!();
         println!("Usage: flowfree [Option] [Path to Puzzle File]");
@@ -312,14 +356,38 @@ fn main() {
         return;
     }
 
-    match Grid::from(&args[1]) {
+    let verbose_i = args.iter().position(|s| s == &"-v");
+
+    match Grid::from(&args[if verbose_i == Some(1) { 2 } else { 1 }]) {
         Ok(grid) => {
+            let verbose = verbose_i.is_some();
             let dims = &grid.get_dims();
-            let mut paths = find_all_paths(&grid);
 
-            backtrack(&mut paths, dims);
+            if verbose {
+                print!("Generating the paths... ")
+            }
 
-            println!("{}", generate_final_grid(&paths, dims).to_string())
+            let paths = generate_all_paths(&grid);
+
+            if verbose {
+                println!("Done!");
+            }
+
+            let mut paths_refs = get_paths_refs(&paths);
+
+            if verbose {
+                println!("Pruning the paths using backtracking... ");
+            }
+
+            backtrack(&mut paths_refs, dims, verbose);
+
+            if verbose {
+                print!("{ESC}[{}E", dims.0 + 1);
+                println!("Done!");
+                println!("The following solution has been found: ")
+            }
+
+            println!("{}", generate_final_grid(&paths_refs, dims).to_string())
         }
 
         Err(e) => {
